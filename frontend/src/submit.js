@@ -1,16 +1,29 @@
 // submit.js
-// Part 4: send the pipeline to the backend and show the parse result.
+// Submit buttons for the pipeline.
+//
+// Two actions:
+//   1. "Analyze"  — POST /pipelines/parse  (DAG check, node/edge count)
+//   2. "Run"      — POST /pipelines/run    (execute the pipeline with real LLM calls)
+//
+// API keys are loaded from localStorage (where the Settings panel saves them)
+// and sent in the request body for /pipelines/run.
 
 import { useState } from 'react';
 import { useStore } from './store';
 import { shallow } from 'zustand/shallow';
+import { getApiKeys } from './settings';
+
+const API_BASE = 'http://localhost:8000';
 
 const selector = (state) => ({
   nodes: state.nodes,
   edges: state.edges,
 });
 
-const ResultModal = ({ result, error, onClose }) => (
+// ---------------------------------------------------------------------------
+// Analyze modal (DAG check)
+// ---------------------------------------------------------------------------
+const AnalyzeModal = ({ result, error, onClose }) => (
   <div className="modal-overlay" onClick={onClose}>
     <div className="modal" onClick={(e) => e.stopPropagation()}>
       {error ? (
@@ -51,44 +64,165 @@ const ResultModal = ({ result, error, onClose }) => (
   </div>
 );
 
+// ---------------------------------------------------------------------------
+// Run results modal (execution output)
+// ---------------------------------------------------------------------------
+const RunModal = ({ result, error, onClose }) => {
+  if (error) {
+    return (
+      <div className="modal-overlay" onClick={onClose}>
+        <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-icon modal-icon-error">✕</div>
+          <h2 className="modal-title">Execution failed</h2>
+          <p className="modal-subtitle">{error}</p>
+          <button className="btn btn-secondary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    );
+  }
+
+  const outputs = result.outputs || {};
+  const nodeEntries = (result.execution_order || []).map((id) => {
+    // Find the node type from the nodes list in the store
+    return { id, output: outputs[id] };
+  });
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+        <div className={`modal-icon ${result.status === 'success' ? 'modal-icon-ok' : 'modal-icon-warn'}`}>
+          {result.status === 'success' ? '✓' : '!'}
+        </div>
+        <h2 className="modal-title">
+          {result.status === 'success' ? 'Pipeline executed' : 'Pipeline executed with errors'}
+        </h2>
+        <p className="modal-subtitle">
+          {result.status === 'success'
+            ? `${nodeEntries.length} node(s) executed successfully.`
+            : result.error}
+        </p>
+
+        {result.final_output !== null && result.final_output !== undefined && (
+          <div className="run-final-output">
+            <span className="run-final-label">Final Output</span>
+            <pre className="run-final-value">{String(result.final_output)}</pre>
+          </div>
+        )}
+
+        <div className="run-outputs">
+          <span className="run-outputs-label">Node outputs ({nodeEntries.length})</span>
+          <div className="run-outputs-list">
+            {nodeEntries.map(({ id, output }) => (
+              <div key={id} className="run-output-item">
+                <span className="run-output-id">{id}</span>
+                <pre className="run-output-value">{String(output ?? '')}</pre>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <button className="btn btn-secondary" onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Submit button cluster
+// ---------------------------------------------------------------------------
 export const SubmitButton = () => {
   const { nodes, edges } = useStore(selector, shallow);
-  const [result, setResult] = useState(null);
+  const [analyzeResult, setAnalyzeResult] = useState(null);
+  const [runResult, setRunResult] = useState(null);
   const [error, setError] = useState(null);
-  const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [modal, setModal] = useState(null); // 'analyze' | 'run' | null
+  const [analyzing, setAnalyzing] = useState(false);
+  const [running, setRunning] = useState(false);
 
-  const handleSubmit = async () => {
-    setLoading(true);
+  const handleAnalyze = async () => {
+    setAnalyzing(true);
     setError(null);
-    setResult(null);
+    setAnalyzeResult(null);
     try {
-      const response = await fetch('http://localhost:8000/pipelines/parse', {
+      const response = await fetch(`${API_BASE}/pipelines/parse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nodes, edges }),
       });
       if (!response.ok) throw new Error(`Backend returned ${response.status}`);
-      setResult(await response.json());
+      setAnalyzeResult(await response.json());
+      setModal('analyze');
     } catch (err) {
       setError(
         err.message.includes('fetch')
           ? 'Could not reach the backend. Is it running on http://localhost:8000?'
           : err.message
       );
+      setModal('analyze');
     } finally {
-      setLoading(false);
-      setOpen(true);
+      setAnalyzing(false);
+    }
+  };
+
+  const handleRun = async () => {
+    setRunning(true);
+    setError(null);
+    setRunResult(null);
+    try {
+      const apiKeys = getApiKeys();
+      const response = await fetch(`${API_BASE}/pipelines/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodes, edges, api_keys: apiKeys }),
+      });
+      if (!response.ok) throw new Error(`Backend returned ${response.status}`);
+      const data = await response.json();
+      setRunResult(data);
+      setModal('run');
+    } catch (err) {
+      setError(
+        err.message.includes('fetch')
+          ? 'Could not reach the backend. Is it running on http://localhost:8000?'
+          : err.message
+      );
+      setModal('run');
+    } finally {
+      setRunning(false);
     }
   };
 
   return (
     <>
-      <button className="btn btn-primary" onClick={handleSubmit} disabled={loading}>
-        {loading ? 'Analyzing…' : 'Submit pipeline'}
-      </button>
-      {open && (
-        <ResultModal result={result} error={error} onClose={() => setOpen(false)} />
+      <div className="header-actions">
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={handleAnalyze}
+          disabled={analyzing || running}
+        >
+          {analyzing ? 'Analyzing…' : 'Analyze'}
+        </button>
+        <button
+          className="btn btn-primary"
+          onClick={handleRun}
+          disabled={analyzing || running}
+        >
+          {running ? 'Running…' : '▶ Run pipeline'}
+        </button>
+      </div>
+
+      {modal === 'analyze' && (
+        <AnalyzeModal
+          result={analyzeResult}
+          error={error}
+          onClose={() => { setModal(null); setError(null); }}
+        />
+      )}
+      {modal === 'run' && (
+        <RunModal
+          result={runResult}
+          error={error}
+          onClose={() => { setModal(null); setError(null); }}
+        />
       )}
     </>
   );
